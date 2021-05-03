@@ -3,6 +3,8 @@ Portfolio: Class assigment cleaned up for portfolio
 
 Back to [Home Page](https://jerryfinn.github.io/)
 
+**WARNING:** *I had to leave out the main data file loan_stat542.csv and the training data. They are over 100Mb, too large for the free tier of github*
+
 ## Introduction
 
 This was an assignment for one of my machine learning classes when I was working on my masters in data science. 

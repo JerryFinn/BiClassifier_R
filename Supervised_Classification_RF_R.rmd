@@ -1,0 +1,458 @@
+---
+title: "Binary Classification Problem in R"
+output:
+  html_document:
+    theme: readable
+  pdf_document:
+    toc: no
+subtitle: 'A semi-weekly class project'
+authors: 'Jerry Finn'
+---
+
+Back to [Home Page](https://jerryfinn.github.io/)
+
+# Introduction
+
+This was an assignment for one of my machine learning classes when I was working on my masters in data science. 
+
+For this assignment, historical data from an institution called the "Lending Club" was taken from Kaggle. The university reduced the variables to 30 features in total including the response 'loan_status'. 
+
+The assignment allowed us to submit up to 3 models for scoring, and the grade was based on the score of the best model. We were also given a file designating 3 train and test splits of the data to use in our own testing and debugging. Originally the programs for the assignment were a group of ".R" files, not a notebook (.Rmd) as I have here. But to make this an easier read, I've put every thing in one notebook.  
+
+This notebook has 3 examples  
+ 1. Logistical Regression using glmnet  
+ 2. Gradient Booster Tree using xgboost  
+ 3. Random Forest using h2o  
+
+In the interest of full disclosure, I'll admit during the assignment I was pressed for time and only submitted the logistical regression and random forest model because the random forest model was hitting the score needed for full credit. I came back later and did the gradient booster model, just to see how it would do. It turned out to perform really well, so now I'm a big fan of that technique.
+
+First we start off with our data cleaning. Creating the features is mainly converting strings to factors or numeric as appropriate, and deleting the rest. 
+
+```{r dataprep}
+dataprep = function(df) {
+    # Parameter df - Dataframe of raw data to be cleaned
+    # Returns cleaned dataframe
+    
+    df$id = NULL
+    # Nonstructured text will not be predictive as factors or numeric
+    df$emp_title = NULL
+    df$title = NULL
+    # The response variable was fairly uniform across zip and state. Therefore this would not be predictive 
+    df$zip_code = NULL            
+    df$addr_state = NULL
+    # Grade is a aggregation of sub_grade
+    df$grade = NULL
+    
+    # Convert string variables to numeric
+    df$term=gsub(" months", "", df$term)
+    df$term=as.numeric(as.character(df$term))
+    if("emp_length" %in% colnames(df)) {
+      df$emp_length=factor(df$emp_length,
+         levels=c("< 1 year","1 year","2 years","3 years",
+                  "4 years","5 years","6 years",
+                  "7 years","8 years","9 years","10+ years"))
+      df$emp_length=as.numeric(df$emp_length)
+    }
+    
+    # Convert string variables to factor.
+    if("sub_grade" %in% colnames(df)) {
+      df$sub_grade=factor(df$sub_grade,
+         levels=c("A1","A2","A3","A4","A5","B1","B2","B3","B4","B5",
+                  "C1","C2","C3","C4","C5","D1","D2","D3","D4","D5",
+                  "E1","E2","E3","E4","E5","F1","F2","F3","F4","F5",
+                  "G1","G2","G3","G4","G5"))
+    }
+    if("home_ownership" %in% colnames(df)) {
+      df$home_ownership=factor(df$home_ownership,
+         levels=c("RENT", "MORTGAGE", "OWN", "ANY", "OTHER", "NONE"))
+    }
+    if("verification_status" %in% colnames(df)) {
+      df$verification_status=factor(df$verification_status,
+         levels=c("Source Verified", "Not Verified",  "Verified"))
+    }
+    if("purpose" %in% colnames(df)) {
+      df$purpose=factor(df$purpose,
+         levels=c("debt_consolidation", "credit_card", "home_improvement", "house",             
+                  "medical", "other", "car", "major_purchase",     
+                  "small_business", "moving", "vacation", "renewable_energy",  
+                  "wedding", "educational" ))
+    }
+    if("initial_list_status" %in% colnames(df)) {
+      df$initial_list_status=factor(df$initial_list_status,
+         levels=c("w", "f"))
+    }
+    if("application_type" %in% colnames(df)) {
+      df$application_type=factor(df$application_type,
+         levels=c("Individual", "Joint App"))
+    }
+    
+    # Convert date variable to numeric representing a duration
+    temp=as.character(df$earliest_cr_line)
+    temp = gsub('Jan', '01-01', temp)
+    temp = gsub('Feb', '01-02', temp)
+    temp = gsub('Mar', '01-03', temp)
+    temp = gsub('Apr', '01-04', temp)
+    temp = gsub('May', '01-05', temp)
+    temp = gsub('Jun', '01-06', temp)
+    temp = gsub('Jul', '01-07', temp)
+    temp = gsub('Aug', '01-08', temp)
+    temp = gsub('Sep', '01-09', temp)
+    temp = gsub('Oct', '01-10', temp)
+    temp = gsub('Nov', '01-11', temp)
+    temp = gsub('Dec', '01-12', temp)
+    temp2 = strptime(temp, format = "%d-%m-%Y")
+    df$m = (as.yearmon(temp2)-
+     as.yearmon(strptime("01-01-1970", format = "%d-%m-%Y")))*12
+    df$earliest_cr_line = NULL
+    
+    # It was already known that there are few missing values
+    # Find variable with missing values and impute the mean value
+    for ( i in 1:length(df) ) {
+      if ( sum(is.na(df[,i])) != 0 ) {
+        if ( ! is.factor(df[,i]) ) {
+          # For numerics just impute the mean
+          df[is.na(df[,i]),i] = mean(df[,i], na.rm=TRUE)
+        } else {
+          # For categorical, just create a category of "Other"
+          levels(df[,i]) <- c(levels(df[,i]),"Other")
+          df[,i][is.na(df[,i])] <- "Other"
+        }
+      } 
+    }
+  return(df)
+}
+
+```
+
+This is a helper function that writes the submission files that the university evaluated. They all had to have the pattern mysubmission*n*.txt, where *n* was a number 1-3 cooresponding to a model. 
+
+```{r write_submit}
+write_submit=function(ts_id, prob, i) {
+  # Parameters:
+  # ts_id - vector of row id's to identify the observation
+  # prob - vector of probability predictions 
+  # i - submission number 1-3 that corresponds to the model making the prediction
+  # No return value.
+  mysubmit=data.frame(cbind(ts_id, round(prob, digits = 4)))
+  names(mysubmit)=c("id", "prob")
+  myfln=paste0("mysubmission", i, ".txt")
+  readr::write_csv(mysubmit, myfln)
+}
+```
+
+The next 3 functions are the models I chose:    
+ 1.  Gradient Booster Tree  
+ 2.  Logistic Regression  
+ 3.  Random Forest  
+
+```{r xgboost-tree}
+xgboost_model=function(tr, ts, ts_id, i) {
+    # Parameters
+    # tr - training dataframe
+    # ts - testing dataframe to make predictions on
+    # ts_id - vector of ids that coorespond to the test dataframe entries
+    # i - number that identifies the model and will be used in the submission file name
+    set.seed(123)
+    # We are going to split the training data so we can have a validation
+    #  dataframe before we do final predictions
+    dt = sort(sample(nrow(tr), nrow(tr)*.7))
+    tr2=tr[dt,]
+    val=tr[-dt,]
+    train_matrix = sparse.model.matrix(loan_status ~ .-1, data = tr2)
+    valid_matrix = sparse.model.matrix(loan_status ~ .-1, data = val)
+    tests_matrix = sparse.model.matrix(~ .-1, data = ts)
+ 
+    # Prepare matrix for XGBoost algorithm
+    dtrain = xgb.DMatrix(data = train_matrix, label = tr2$loan_status) 
+    dvalid = xgb.DMatrix(data = valid_matrix, label = val$loan_status) 
+    dtests = xgb.DMatrix(data = tests_matrix)
+    
+    set.seed(123)
+    params = list(booster = "gbtree", 
+                   objective = "binary:logistic")
+    xgb_model = xgb.train (params = params,
+                           data = dtrain,
+                           max.depth=6,            # default                       
+                           nrounds =1000,
+                           eval_metric = "logloss",
+                           early_stopping_rounds = 100,
+                           verbose=0,
+                           watchlist = list(train= dtrain, val= dvalid))
+
+    # Predict probabilities and write them to a submission file
+    prob=predict(xgb_model, dtests)
+    if ( length(prob) != length(ts_id) ) { stop("id and prob length dont match")}
+    write_submit(ts_id, prob, i)
+
+}
+
+```
+
+
+```{r general-logistic}
+glmnet_model=function(tr,ts,ts_id, i) {
+    # Parameters
+    # tr - training dataframe
+    # ts - testing dataframe to make predictions on
+    # ts_id - vector of ids that coorespond to the test dataframe entries
+    # i - number that identifies the model and will be used in the submission file name
+  
+    # glmnet want input data in matrix format
+    Y=as.matrix(tr$loan_status)
+    tr$loan_status = NULL
+    X=model.matrix(~0+., data=tr) 
+    tsX=model.matrix(~0+., data=ts)
+
+    # Here we do cross validation to find the best lambda parameter  
+    l_seq =  exp(seq(-20, -6, length=100))
+    cv.out = cv.glmnet(X, Y, family="binomial",alpha = 1, lambda = l_seq)
+    best.lam = cv.out$lambda.min
+  
+    #### debug
+    # Here during debugging I plotted out the Binomial Deviance and log lambda
+    # Doing this each split in this file would be too messy, so it will be commented out
+    #plot(cv.out)
+ 
+    # Predict probabilities and write them to a submission file 
+    prob=predict(cv.out, lambda=best.lam, newx = tsX, type="response")
+    if ( length(prob) != length(ts_id) ) { stop("id and prob length dont match")}
+    write_submit(ts_id, prob, i)
+
+}
+
+```
+
+
+```{r randomForest, error=FALSE, warning=FALSE, message=FALSE}
+rf_model = function(tr,ts,ts_id, i) {
+    # Parameters
+    # tr - training dataframe
+    # ts - testing dataframe to make predictions on
+    # ts_id - vector of ids that coorespond to the test dataframe entries
+    # i - number that identifies the model and will be used in the submission file name
+
+    # The response variable has to be a factor not a number otherwise h2o will
+    #  do regression instead of classification
+    tr$loan_status = as.factor(tr$loan_status)
+    rf_tr = as.h2o(tr)
+    rf_ts = as.h2o(ts)
+
+    mm <- h2o.randomForest(y = "loan_status",
+                           training_frame = rf_tr,
+                           model_id = "mm",
+                           seed = 1,
+                           ntrees = 200,
+                           max_depth = 25)
+  
+    # Predict probabilities and write them to a submission file  
+    prob=h2o.predict(mm, newdata=rf_ts)
+    if ( nrow(prob$p1) != length(ts_id) ) { stop("id and prob length dont match")}
+    write_submit(ts_id, as.vector(prob$p1), i)
+  
+}
+```
+
+Originally the below function was the 'main' part of the R program submitted and was run once. Here I converted it to a function so I could run it 3 times, once for each testing split.  
+
+```{r original-main}
+main_for_class_submission=function() {
+  # Parameters: None
+  # Return: timing - vector of the minutes needed to run the model
+  timing=c(0,0,0)
+
+  training <- read.csv('train.csv')
+  training_id = training$id
+  training = dataprep(training)
+
+  # Convert the target variable into a binary value
+  training_y_raw = training$loan_status
+  training$loan_status = as.numeric(training_y_raw!="Charged Off" & training_y_raw !="Default")
+  
+  testing <- read.csv('test.csv')
+  testing_id = testing$id
+  testing = dataprep(testing)
+  
+  start.time = Sys.time()
+  glmnet_model(training,testing,testing_id,1)
+  end.time = Sys.time()
+  timing[1] = round(as.numeric(difftime(end.time, start.time, units = 'min')), digits = 1)
+
+  start.time = Sys.time()
+  xgboost_model(training,testing,testing_id,2)
+  end.time = Sys.time()
+  timing[2] = round(as.numeric(difftime(end.time, start.time, units = 'min')), digits = 1)
+
+  start.time = Sys.time()
+  rf_model(training,testing,testing_id,3)
+  end.time = Sys.time()
+  timing[3] = round(as.numeric(difftime(end.time, start.time, units = 'min')), digits = 1)
+
+  return(timing)
+}
+
+```
+
+The evaluation code below was provided, mostly, by the professor. I made a few adjustments so we could run it in a Rmarkdown file.
+
+```{r log-loss-evaluation}
+# The code in this chunk was provided by the university (with slight modification here) for our testing
+logLoss = function(y, p){
+    if (length(p) != length(y)){
+        stop('Lengths of prediction and labels do not match.')
+    }
+    
+    if (any(p < 0)){
+        stop('Negative probability provided.')
+    }
+    
+    p = pmax(pmin(p, 1 - 10^(-15)), 10^(-15))
+    mean(ifelse(y == 1, -log(p), -log(1 - p)))
+}
+
+#########################################################################
+# Test code begins
+evaluate_main_from_class = function(){
+  # submission files
+  allFiles = list.files()
+  subFiles = grep('mysubmission', allFiles, value = TRUE, 
+                  ignore.case = TRUE)
+  
+  # calculate the test error on the test set
+  test = read.csv('test.csv')
+  
+  label = read.csv('label.csv', sep = ',')
+  err = rep(0, 3)
+  for (met in 1:length(subFiles)){
+      prediction = read.csv(subFiles[met], sep = ',')
+      yp = merge(prediction, label, by = 'id', all.y = TRUE)
+      modelnum=strtoi(substr(subFiles[met], 13, 13))
+      err[modelnum] = with(yp, logLoss(y, prob))
+  }
+  return(err)
+
+}
+
+```
+
+The instructions for the assignment were to assume there would be separate files for training and testing data:  
+
+* train.csv
+* test.csv    
+
+repectively. 
+For our own validations we were given a larger file and 3 suggested train/test splits for testing. Here we'll read the larger file and save the split with the names above. 
+
+```{r train-test-split}
+###################################################
+# Code used for testing only. 
+###################################################
+
+do_splits = function(n) {
+  # Parameter: n - number of the which split to use of the 3 provided by the instructor
+  train_raw <- read.csv('loan_stat542.csv')
+  (sapply(train_raw, function(x) sum(is.na(x))))/nrow(train_raw)
+  test_ids <- read.csv('Project3_test_id.csv')
+  # Here we take the column that corresponds to the split we want to use
+  test_id = (train_raw[,1] %in% test_ids[,n])
+  
+  train = train_raw[!test_id, ]
+  test = train_raw[test_id, ]
+  loan_status = test$loan_status
+  y = as.numeric(loan_status!="Charged Off" & loan_status!="Default")
+  label = data.frame(cbind(test$id, y))
+  colnames(label) = c("id", "y")
+  readr::write_csv(label, "label.csv")
+  readr::write_csv(train, 'train.csv')
+  test$loan_status = NULL
+  readr::write_csv(test, 'test.csv')
+}
+
+```
+
+## The Main of This Notebook
+
+Finally we come to the driver of the project that calls the above functions.  
+
+We'll load packages and start verbose packages as silently as we can here first.
+
+```{r load-packages, error=FALSE, warning=FALSE, message=FALSE}
+################# Main 
+mypackages = c("zoo","glmnet", "h2o", "kableExtra", "xgboost")   # required packages
+tmp = setdiff(mypackages, rownames(installed.packages()))  # packages need to be installed
+if (length(tmp) > 0) install.packages(tmp)
+lapply(mypackages, require, character.only = TRUE)
+```
+
+```{r load-h20, error=FALSE, warning=FALSE, message=FALSE}
+# Here we init h2o but suppress the output, since this package is annoyingly verbose. Other than that I love it 
+h2o.init()
+h2o.no_progress()          # disable progress bar later when models are run
+```
+
+## Run the Tests
+
+```{r driver-section}
+
+dftiming <- data.frame(matrix(ncol = 3, nrow = 0))
+dfscore <- data.frame(matrix(ncol = 3, nrow = 0))
+
+for(n in 1:3) {
+   do_splits(n)
+   allFiles = list.files()
+   subFiles = grep('mysubmission', allFiles, value = TRUE, 
+                  ignore.case = TRUE)
+   for (met in 1:length(subFiles)){
+      file.remove(subFiles[met])
+   }
+   splittimings=main_for_class_submission()
+   splitscore=evaluate_main_from_class()
+   dftiming=rbind(dftiming, splittimings)
+   dfscore=rbind(dfscore, splitscore)
+}
+
+x <- c("Log Regress", "Gradient Boost", "Random Forest")
+y <- c("split 1", "split 2", "split 3")
+colnames(dfscore)=x
+colnames(dftiming)=x
+rownames(dfscore)=y    
+rownames(dftiming)=y
+write.table(dfscore, file = 'Scores.csv', sep = ',', row.names = FALSE,
+            col.names = TRUE)
+write.table(dftiming, file = 'Timing.csv', sep = ',', 
+            row.names = FALSE, col.names = TRUE)
+```
+
+## Results  
+
+Here we'll print out some tables to examine the results (and also provide an example of how to use kable for simple HTML tables)
+
+### Timing
+
+```{r Timing-Table, comment=NA, results='asis'}
+kbl(dftiming, caption="Model Timing", booktabs = TRUE) %>%
+  kable_classic_2(full_width = F,  position = "left") %>%
+  column_spec(1, width = "4cm") %>%
+  column_spec(2, width = "4cm") %>%
+  column_spec(3, width = "4cm") 
+```
+
+### Performance
+
+```{r Loss-Table, comment=NA, results='asis'}
+kbl(dfscore, caption="Log Loss Score", booktabs = T, digits=3) %>%
+  kable_classic_2(full_width = FALSE, position = "left") %>%
+  column_spec(1, width = "4cm") %>%
+  column_spec(2, width = "4cm") %>%
+  column_spec(3, width = "4cm") 
+```
+
+## Conclusion 
+
+The instructors evaluated the prediction accuracy using Log-loss, which determined the grade. I received full credit using the random forest model
+
+The gradient booster model did best in time and scoring. It looks like this will be my new default on similar problems.  
+
+While Logistic Regression seems to do the worst, with regards to timing, keep in mind that the model was trained with a grid search for good parameters, and cross validation. This was no doubt time consuming. In contract xgboost does not provide a built in grid search. There are examples on how to write your own grid search for xgboost on stack overflow, which shows that this would not be infeasible if needed. But just a little of trial and error delivered the needed performance from random forest and gradient boosting for this exercise.  
+
+
+
